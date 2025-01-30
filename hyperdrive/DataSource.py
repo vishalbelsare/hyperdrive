@@ -1,13 +1,24 @@
 import os
+import json
 import requests
 from time import sleep, time
+from bs4 import BeautifulSoup
 import pandas as pd
-from polygon import RESTClient
+from random import random
+from polygon import RESTClient, exceptions
 from dotenv import load_dotenv, find_dotenv
 from FileOps import FileReader, FileWriter
+from Calculus import Calculator
 from TimeMachine import TimeTraveller
 from Constants import PathFinder
 import Constants as C
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 
 
 class MarketData:
@@ -17,7 +28,11 @@ class MarketData:
         self.reader = FileReader()
         self.finder = PathFinder()
         self.traveller = TimeTraveller()
-        self.provider = 'iexcloud'
+        self.calculator = Calculator()
+        self.provider = 'polygon'
+
+    def get_indexer(self, s1, s2):
+        return list(s1.intersection(s2))
 
     def try_again(self, func, **kwargs):
         retries = (kwargs['retries']
@@ -174,84 +189,6 @@ class MarketData:
         if os.path.exists(filename):
             return filename
 
-    def get_social_sentiment(self, symbol, timeframe='max'):
-        # given a symbol, return a cached dataframe
-        df = self.reader.load_csv(
-            self.finder.get_sentiment_path(symbol))
-        filtered = self.reader.data_in_timeframe(df, C.TIME, timeframe)[
-            [C.TIME, C.POS, C.NEG]]
-        return filtered
-
-    def get_social_volume(self, symbol, timeframe='max'):
-        # given a symbol, return a cached dataframe
-        df = self.reader.load_csv(
-            self.finder.get_sentiment_path(symbol))
-        filtered = self.reader.data_in_timeframe(df, C.TIME, timeframe)[
-            [C.TIME, C.VOL, C.DELTA]]
-        return filtered
-
-    def save_social_sentiment(self, **kwargs):
-        # # given a symbol, save its sentiment data
-        symbol = kwargs['symbol']
-        filename = self.finder.get_sentiment_path(symbol)
-
-        if os.path.exists(filename):
-            os.remove(filename)
-
-        sen_df = self.reader.update_df(
-            filename, self.get_social_sentiment(**kwargs), C.TIME)
-        sen_df = sen_df[{C.TIME, C.POS, C.NEG}.intersection(sen_df.columns)]
-
-        vol_df = self.reader.update_df(
-            filename, self.get_social_volume(**kwargs), C.TIME)
-        vol_df = vol_df[{C.TIME, C.VOL, C.DELTA}.intersection(vol_df.columns)]
-
-        if sen_df.empty and not vol_df.empty:
-            df = vol_df
-        elif not sen_df.empty and vol_df.empty:
-            df = sen_df
-        elif not sen_df.empty and not vol_df.empty:
-            df = sen_df.merge(vol_df, how="outer", on=C.TIME)
-        else:
-            return
-        self.writer.update_csv(filename, df)
-        if os.path.exists(filename):
-            return filename
-
-    def standardize_sentiment(self, symbol, df):
-        full_mapping = dict(
-            zip(
-                ['timestamp', 'bullish', 'bearish'],
-                [C.TIME, C.POS, C.NEG]
-            )
-        )
-        filename = self.finder.get_sentiment_path(symbol, self.provider)
-        df = self.standardize(
-            df,
-            full_mapping,
-            filename,
-            [C.TIME, C.POS, C.NEG],
-            0
-        )
-        return df[{C.TIME, C.POS, C.NEG}.intersection(df.columns)]
-
-    def standardize_volume(self, symbol, df):
-        full_mapping = dict(
-            zip(
-                ['timestamp', 'volume_score', 'volume_change'],
-                [C.TIME, C.VOL, C.DELTA]
-            )
-        )
-        filename = self.finder.get_sentiment_path(symbol, self.provider)
-        df = self.standardize(
-            df,
-            full_mapping,
-            filename,
-            [C.TIME, C.VOL, C.DELTA],
-            0
-        )
-        return df[{C.TIME, C.VOL, C.DELTA}.intersection(df.columns)]
-
     def get_intraday(self, symbol, min=1, timeframe='max', extra_hrs=False):
         # implement way to transform 1 min dataset to 5 min data
         #  or 30 or 60 should be flexible soln
@@ -331,7 +268,7 @@ class MarketData:
             [C.TIME, C.HALVING, C.RATIO],
             0
         )
-        return df[{C.TIME, C.HALVING, C.RATIO}.intersection(df.columns)]
+        return df[self.get_indexer({C.TIME, C.HALVING, C.RATIO}, df.columns)]
 
     def get_s2f_ratio(self, timeframe='max'):
         # given a symbol, return a cached dataframe
@@ -371,7 +308,7 @@ class MarketData:
             [C.TIME] + C.MAs,
             0
         )
-        return df[set([C.TIME] + C.MAs).intersection(df.columns)]
+        return df[self.get_indexer(set([C.TIME] + C.MAs), df.columns)]
 
     def get_diff_ribbon(self, timeframe='max'):
         # given a symbol, return a cached dataframe
@@ -410,7 +347,7 @@ class MarketData:
             [C.TIME, C.SOPR],
             1
         )
-        return df[{C.TIME, C.SOPR}.intersection(df.columns)]
+        return df[self.get_indexer({C.TIME, C.SOPR}, df.columns)]
 
     def get_sopr(self, timeframe='max'):
         # given a symbol, return a cached dataframe
@@ -435,209 +372,188 @@ class MarketData:
             return filename
     # def handle_request(self, url, err_msg):
 
+    def standardize_ndx(self, df):
+        if df.empty:
+            df = pd.DataFrame(columns=[C.TIME, C.SYMBOL, C.DELTA])
+        df = df.sort_values(
+            by=[C.TIME, C.SYMBOL]
+        ).drop_duplicates(C.SYMBOL, 'last')
+        df = df[df[C.DELTA] == '+'].reset_index(drop=True)
+        return df
 
-class IEXCloud(MarketData):
-    def __init__(self, test=False):
+    def get_saved_ndx(self):
+        df = self.reader.load_csv(self.finder.get_ndx_path())
+        return df
+
+    def get_ndx(self, date=datetime.now()):
+        date = self.traveller.convert_date(date)
+        df = self.get_saved_ndx()
+        return self.standardize_ndx(
+            df[df[C.TIME] <= date] if C.TIME in df else df)
+
+    def get_latest_ndx(self, **kwargs):
+        def _get_latest_ndx():
+            url = "https://en.wikipedia.org/wiki/Nasdaq-100#Components"
+            # alternatives:
+            # https://www.nasdaq.com/solutions/nasdaq-100/companies
+            # https://www.cnbc.com/nasdaq-100/
+            res = requests.get(url)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            html = soup.select("table#constituents")[0]
+            df = pd.read_html(str(html))[0]
+            symbols = df[C.SYMBOL]
+            today = datetime.today().strftime(C.DATE_FMT)
+            df = pd.DataFrame({
+                C.TIME: len(symbols) * [today],
+                C.SYMBOL: symbols,
+                C.DELTA: len(symbols) * ['+']
+            })
+            return df
+        return self.try_again(func=_get_latest_ndx, **kwargs)
+
+    def save_ndx(self, **kwargs):
+        filename = self.finder.get_ndx_path()
+
+        if os.path.exists(filename):
+            os.remove(filename)
+
+        saved = self.get_saved_ndx()
+        before = set(self.standardize_ndx(saved)[C.SYMBOL])
+        after = set(self.get_latest_ndx(**kwargs)[C.SYMBOL])
+        today = datetime.now().strftime(C.DATE_FMT)
+        minus, plus = self.calculator.get_difference(before, after)
+        union = list(minus.union(plus))
+        to_append = pd.DataFrame({
+            C.TIME: [today] * len(union),
+            C.SYMBOL: union,
+            C.DELTA: ['+' if u in plus else '-' for u in union]
+        })
+        df = pd.concat([saved, to_append], ignore_index=True).sort_values(
+            by=[C.TIME, C.SYMBOL]).reset_index(drop=True)
+        self.writer.update_csv(filename, df)
+
+        if os.path.exists(filename):
+            return filename
+
+    def log_api_call_time(self):
+        self.last_api_call_time = time()
+
+    def obey_free_limit(self, free_delay):
+        if self.free and hasattr(self, 'last_api_call_time'):
+            time_since_last_call = time() - self.last_api_call_time
+            delay = free_delay - time_since_last_call
+            if delay > 0:
+                sleep(delay)
+
+
+class Indices(MarketData):
+    def __init__(self):
         super().__init__()
-        self.version = 'v1'
-        self.provider = 'iexcloud'
 
-        if test:
-            self.base = 'https://sandbox.iexapis.com'
-            self.token = os.environ['IEXCLOUD_SANDBOX']
-        else:
-            self.base = 'https://cloud.iexapis.com'
-            self.token = os.environ['IEXCLOUD']
+    def get_ndx(self, date=datetime.now()):
+        old = super().get_ndx(date)
+        date = self.traveller.convert_date(date)
+        new = self.get_latest_ndx()
+        new = new[new[C.TIME] <= date]
+        df = pd.concat([old, new])
+        return self.standardize_ndx(df)
 
-    def get_dividends(self, **kwargs):
-        # given a symbol, return the dividend history
-        def _get_dividends(symbol, timeframe='3m'):
-            category = 'stock'
-            dataset = 'dividends'
-            parts = [
-                self.base,
-                self.version,
-                category,
-                symbol.lower(),
-                dataset,
-                timeframe
-            ]
-            url = '/'.join(parts)
-            params = {'token': self.token}
-            response = requests.get(url, params=params)
-            empty = pd.DataFrame()
 
-            if response.ok:
-                data = [datum for datum in response.json() if datum['flag']
-                        == 'Cash' and datum['currency'] == 'USD']
-            else:
-                raise Exception(
-                    f'Invalid response from IEX for {symbol} dividends.')
+class AlpacaData(MarketData):
+    def __init__(
+            self,
+            token=os.environ.get('ALPACA'),
+            secret=os.environ.get('ALPACA_SECRET'),
+            free=True,
+            paper=False
+    ):
+        super().__init__()
+        self.base = 'https://data.alpaca.markets'
+        self.token = os.environ.get(
+            'ALPACA_PAPER') if paper or C.TEST else token
+        self.secret = os.environ.get(
+            'ALPACA_PAPER_SECRET') if paper or C.TEST else secret
+        if not (self.token and self.secret):
+            raise Exception('missing Alpaca credentials')
+        self.provider = 'alpaca'
+        self.free = free
 
-            if data == []:
-                return empty
-
-            df = self.standardize_dividends(symbol, pd.DataFrame(data))
-            return self.reader.data_in_timeframe(df, C.EX, timeframe)
-
-        return self.try_again(func=_get_dividends, **kwargs)
-
-    def get_splits(self, **kwargs):
-        # given a symbol, return the stock splits
-        def _get_splits(symbol, timeframe='3m'):
-            category = 'stock'
-            dataset = 'splits'
-            parts = [
-                self.base,
-                self.version,
-                category,
-                symbol.lower(),
-                dataset,
-                timeframe
-            ]
-            url = '/'.join(parts)
-            params = {'token': self.token}
-            response = requests.get(url, params=params)
-            empty = pd.DataFrame()
-
-            if response.ok:
-                data = response.json()
-            else:
-                raise Exception(
-                    f'Invalid response from IEX for {symbol} splits.')
-
-            if data == []:
-                return empty
-
-            df = self.standardize_splits(symbol, pd.DataFrame(data))
-            return self.reader.data_in_timeframe(df, C.EX, timeframe)
-
-        return self.try_again(func=_get_splits, **kwargs)
+    # def get_dividends(self, **kwargs):
+    #     pass
+    # def get_splits(self, **kwargs):
+    #     pass
 
     def get_ohlc(self, **kwargs):
-        def _get_prev_ohlc(symbol):
-            category = 'stock'
-            dataset = 'previous'
+        def _get_ohlc(symbol, timeframe='max'):
+            is_crypto = symbol in C.ALPC_CRYPTO_SYMBOLS
+            version = 'v1beta3' if is_crypto else 'v2'
+            page_token = None
+            start, _ = self.traveller.convert_dates(timeframe)
             parts = [
                 self.base,
-                self.version,
-                category,
-                symbol.lower(),
-                dataset
+                version,
+                'crypto/us' if is_crypto else 'stocks',
+                'bars',
             ]
             url = '/'.join(parts)
-            params = {'token': self.token}
-            response = requests.get(url, params=params)
-            empty = pd.DataFrame()
-
-            if response.ok:
-                data = response.json()
-            else:
-                raise Exception(
-                    f'Invalid response from IEX for {symbol} OHLC.')
-
-            if data == []:
-                return empty
-
-            df = pd.DataFrame([data])
-            return self.standardize_ohlc(symbol, df)
-
-        def _get_ohlc(symbol, timeframe='1m'):
-            if timeframe == '1d':
-                return _get_prev_ohlc(symbol)
-
-            category = 'stock'
-            dataset = 'chart'
-            parts = [
-                self.base,
-                self.version,
-                category,
-                symbol.lower(),
-                dataset,
-                timeframe
-            ]
-            url = '/'.join(parts)
-            params = {'token': self.token}
-            response = requests.get(url, params=params)
-            empty = pd.DataFrame()
-
-            if response.ok:
-                data = response.json()
-            else:
-                raise Exception(
-                    f'Invalid response from IEX for {symbol} OHLC.')
-
-            if data == []:
-                return empty
-
-            df = self.standardize_ohlc(symbol, pd.DataFrame(data))
+            pre_params = {
+                'symbols': symbol,
+                'timeframe': '1D',
+                'start': start,
+                # end should be > 15 min before current UTC time in this format
+                # 2025-01-01T00:00:00Z
+                'limit': 10000,
+            } | ({} if is_crypto else {'adjustment': 'all'})
+            headers = {
+                'APCA-API-KEY-ID': self.token,
+                'APCA-API-SECRET-KEY': self.secret
+            }
+            results = []
+            while True:
+                self.obey_free_limit(C.ALPACA_FREE_DELAY)
+                try:
+                    post_params = {
+                        'page_token': page_token} if page_token else {}
+                    params = pre_params | post_params
+                    response = requests.get(url, params, headers=headers)
+                    if not response.ok:
+                        raise Exception(
+                            'Invalid response from Alpaca for OHLC',
+                            response.status_code,
+                            response.text
+                        )
+                    data = response.json()
+                    if data.get('bars') and data['bars'].get(symbol):
+                        results += data['bars'][symbol]
+                finally:
+                    self.log_api_call_time()
+                if data.get('next_page_token'):
+                    page_token = data['next_page_token']
+                else:
+                    break
+            df = pd.DataFrame(results)
+            columns = {
+                't': 'date',
+                'o': 'open',
+                'h': 'high',
+                'l': 'low',
+                'c': 'close',
+                'v': 'volume',
+                'vw': 'average',
+                'n': 'trades'
+            }
+            df = df.rename(columns=columns)
+            df['date'] = pd.to_datetime(df['date']).dt.tz_convert(
+                C.TZ).dt.tz_localize(None)
+            df = self.standardize_ohlc(symbol, df)
             return self.reader.data_in_timeframe(df, C.TIME, timeframe)
-
         return self.try_again(func=_get_ohlc, **kwargs)
 
-    # extra_hrs should be True if possible
-    def get_intraday(self, **kwargs):
-        def _get_intraday(symbol, min=1, timeframe='max', extra_hrs=True):
-            # pass min directly into hist prices endpoint
-            # to get 1, 5, 30, 60 min granularity if possible
-            # and get extra hrs if possible
-            category = 'stock'
-            dataset = 'chart'
+        # def get_intraday(self, **kwargs):
+        #     pass
 
-            dates = self.traveller.dates_in_range(timeframe)
-            if dates == []:
-                raise Exception(f'No dates in timeframe: {timeframe}.')
-
-            for date in dates:
-                parts = [
-                    self.base,
-                    self.version,
-                    category,
-                    symbol.lower(),
-                    dataset,
-                    'date',
-                    date.replace('-', '')
-                ]
-
-                url = '/'.join(parts)
-                params = {'token': self.token}
-                response = requests.get(url, params=params)
-
-                if response.ok:
-                    data = response.json()
-                else:
-                    raise Exception(
-                        f'Invalid response from IEX for {symbol} intraday.')
-
-                if data == []:
-                    continue
-
-                df = pd.DataFrame(data)
-                df['date'] = pd.to_datetime(df['date'] + ' ' + df['minute'])
-
-                # if all values are na except time, then skip
-                num_data_rows = len(
-                    df.drop(columns=['date', 'minute']).dropna(how='all'))
-                if (num_data_rows == 0):
-                    continue
-
-                res_cols = ['date', 'minute', 'marketOpen', 'marketHigh',
-                            'marketLow', 'marketClose', 'marketVolume',
-                            'marketAverage', 'marketNumberOfTrades']
-                std_cols = ['date', 'minute', 'open', 'high', 'low',
-                            'close', 'volume', 'average', 'trades']
-
-                columns = dict(zip(res_cols, std_cols))
-
-                df = df[res_cols].rename(columns=columns)
-                df.drop(columns='minute', inplace=True)
-
-                filename = self.finder.get_intraday_path(
-                    symbol, date, self.provider)
-                df = self.standardize_ohlc(symbol, df, filename)
-                yield df
-
-        return self.try_again(func=_get_intraday, **kwargs)
+        # def get_news(self, **kwargs):
+        #     pass
 
 
 class Polygon(MarketData):
@@ -647,40 +563,64 @@ class Polygon(MarketData):
         self.provider = 'polygon'
         self.free = free
 
-    def obey_free_limit(self):
-        if self.free and hasattr(self, 'last_api_call_time'):
-            time_since_last_call = time() - self.last_api_call_time
-            delay = C.POLY_FREE_DELAY - time_since_last_call
-            if delay > 0:
-                sleep(delay)
-
-    def log_api_call_time(self):
-        self.last_api_call_time = time()
+    def paginate(self, gen, apply):
+        results = []
+        for idx, item in enumerate(gen):
+            if idx % C.POLY_MAX_LIMIT == 0:
+                self.log_api_call_time()
+            if self.free and idx % C.POLY_MAX_LIMIT == C.POLY_MAX_LIMIT - 1:
+                sleep(C.POLY_FREE_DELAY)
+            results.append(apply(item))
+        return results
 
     def get_dividends(self, **kwargs):
         def _get_dividends(symbol, timeframe='max'):
-            self.obey_free_limit()
+            self.obey_free_limit(C.POLY_FREE_DELAY)
             try:
-                response = self.client.reference_stock_dividends(symbol)
-            except Exception as e:
-                raise e
+                start, _ = self.traveller.convert_dates(timeframe)
+                response = self.paginate(
+                    self.client.list_dividends(
+                        symbol,
+                        ex_dividend_date_gte=start,
+                        order='desc',
+                        sort='ex_dividend_date',
+                        limit=C.POLY_MAX_LIMIT
+                    ),
+                    lambda div: {
+                        'exDate': div.ex_dividend_date,
+                        'paymentDate': div.pay_date,
+                        'declaredDate': div.declaration_date,
+                        'amount': div.cash_amount
+                    }
+                )
             finally:
                 self.log_api_call_time()
-            raw = pd.DataFrame(response.results)
+            raw = pd.DataFrame(response)
             df = self.standardize_dividends(symbol, raw)
             return self.reader.data_in_timeframe(df, C.EX, timeframe)
         return self.try_again(func=_get_dividends, **kwargs)
 
     def get_splits(self, **kwargs):
         def _get_splits(symbol, timeframe='max'):
-            self.obey_free_limit()
+            self.obey_free_limit(C.POLY_FREE_DELAY)
             try:
-                response = self.client.reference_stock_splits(symbol)
-            except Exception as e:
-                raise e
+                start, _ = self.traveller.convert_dates(timeframe)
+                response = self.paginate(
+                    self.client.list_splits(
+                        symbol,
+                        execution_date_gte=start,
+                        order='desc',
+                        sort='execution_date',
+                        limit=C.POLY_MAX_LIMIT
+                    ),
+                    lambda split: {
+                        'exDate': split.execution_date,
+                        'ratio': split.split_from / split.split_to
+                    }
+                )
             finally:
                 self.log_api_call_time()
-            raw = pd.DataFrame(response.results)
+            raw = pd.DataFrame(response)
             df = self.standardize_splits(symbol, raw)
             return self.reader.data_in_timeframe(df, C.EX, timeframe)
         return self.try_again(func=_get_splits, **kwargs)
@@ -690,21 +630,18 @@ class Polygon(MarketData):
             is_crypto = symbol.find('X%3A') == 0
             formatted_start, formatted_end = self.traveller.convert_dates(
                 timeframe)
-            self.obey_free_limit()
+            self.obey_free_limit(C.POLY_FREE_DELAY)
             try:
-                response = self.client.stocks_equities_aggregates(
+                response = self.client.get_aggs(
                     symbol, 1, 'day',
-                    from_=formatted_start, to=formatted_end, unadjusted=False
+                    from_=formatted_start, to=formatted_end, adjusted=True, limit=C.POLY_MAX_AGGS_LIMIT
                 )
-            except Exception as e:
-                raise e
             finally:
                 self.log_api_call_time()
-            raw = response.results
-            columns = {'t': 'date', 'o': 'open', 'h': 'high',
-                       'l': 'low', 'c': 'close', 'v': 'volume',
-                       'vw': 'average', 'n': 'trades'}
 
+            raw = [vars(item) for item in response]
+            columns = {'timestamp': 'date',
+                       'vwap': 'average', 'transactions': 'trades'}
             df = pd.DataFrame(raw).rename(columns=columns)
             if is_crypto:
                 df['date'] = pd.to_datetime(
@@ -727,27 +664,23 @@ class Polygon(MarketData):
             if dates == []:
                 raise Exception(f'No dates in timeframe: {timeframe}.')
 
-            for idx, date in enumerate(dates):
-                self.obey_free_limit()
+            for _, date in enumerate(dates):
+                self.obey_free_limit(C.POLY_FREE_DELAY)
                 try:
-                    response = self.client.stocks_equities_aggregates(
+                    response = self.client.get_aggs(
                         symbol, min, 'minute', from_=date, to=date,
-                        unadjusted=False
+                        adjusted=True, limit=C.POLY_MAX_AGGS_LIMIT
                     )
-                except Exception as e:
-                    raise e
+                except exceptions.NoResultsError:
+                    # This is to prevent breaking the loop over weekends
+                    continue
                 finally:
                     self.log_api_call_time()
 
-                if hasattr(response, 'results'):
-                    response = response.results
-                else:
-                    continue
-
-                columns = {'t': 'date', 'o': 'open', 'h': 'high',
-                           'l': 'low', 'c': 'close', 'v': 'volume',
-                           'vw': 'average', 'n': 'trades'}
-                df = pd.DataFrame(response).rename(columns=columns)
+                raw = [vars(item) for item in response]
+                columns = {'timestamp': 'date',
+                           'vwap': 'average', 'transactions': 'trades'}
+                df = pd.DataFrame(raw).rename(columns=columns)
                 if is_crypto:
                     df['date'] = pd.to_datetime(
                         df['date'], unit='ms')
@@ -766,97 +699,6 @@ class Polygon(MarketData):
 
 
 # newShares = oldShares / ratio
-
-
-class StockTwits(MarketData):
-    def __init__(self):
-        super().__init__()
-        self.base = 'https://api.stocktwits.com'
-        self.version = '2'
-        self.token = os.environ.get('STOCKTWITS')
-        self.provider = 'stocktwits'
-
-    def get_social_volume(self, **kwargs):
-        def _get_social_volume(symbol, timeframe='max'):
-            parts = [
-                self.base,
-                'api',
-                self.version,
-                'symbols',
-                symbol,
-                'volume.json'
-            ]
-            url = '/'.join(parts)
-            params = {'access_token': self.token}
-            vol_res = requests.get(url, params=params)
-            json_res = vol_res.json()
-            empty = pd.DataFrame()
-
-            if vol_res.ok:
-                vol_data = json_res['data']
-            else:
-                if 'errors' in json_res:
-                    errors = '\n'.join([error['message']
-                                        for error in json_res['errors']])
-                raise Exception(
-                    f'Invalid response from Stocktwits for {symbol}\n{errors}')
-
-            if vol_data == []:
-                return empty
-
-            vol_data.sort(key=lambda x: x['timestamp'])
-            vol_data.pop()
-            df = pd.DataFrame(vol_data)
-            std = self.standardize_volume(symbol, df)
-            if timeframe == '1d':
-                filtered = std.tail(1)
-            else:
-                filtered = self.reader.data_in_timeframe(
-                    std, C.TIME, timeframe)
-                [[C.TIME, C.VOL, C.DELTA]]
-            return filtered
-
-        return self.try_again(func=_get_social_volume, **kwargs)
-
-    def get_social_sentiment(self, **kwargs):
-        def _get_social_sentiment(symbol, timeframe='max'):
-            parts = [
-                self.base,
-                'api',
-                self.version,
-                'symbols',
-                symbol,
-                'sentiment.json'
-            ]
-            url = '/'.join(parts)
-            params = {'access_token': self.token}
-            sen_res = requests.get(url, params=params)
-            json_res = sen_res.json()
-            empty = pd.DataFrame()
-
-            if sen_res.ok:
-                sen_data = json_res['data']
-            else:
-                if 'errors' in json_res:
-                    errors = '\n'.join([error['message']
-                                        for error in json_res['errors']])
-                raise Exception(
-                    f'Invalid response from Stocktwits for {symbol}\n{errors}')
-
-            if sen_data == []:
-                return empty
-
-            sen_data.sort(key=lambda x: x['timestamp'])
-            sen_data.pop()
-            df = pd.DataFrame(sen_data)
-            std = self.standardize_sentiment(symbol, df)
-            if timeframe == '1d':
-                filtered = std.tail(1)
-            else:
-                filtered = self.reader.data_in_timeframe(
-                    std, C.TIME, timeframe)
-            return filtered
-        return self.try_again(func=_get_social_sentiment, **kwargs)
 
 
 class LaborStats(MarketData):
@@ -901,7 +743,9 @@ class LaborStats(MarketData):
                     )
             else:
                 raise Exception(
-                    'Invalid response from BLS for unemployment rate')
+                    'Invalid response from BLS for unemployment rate',
+                    response.status_code, response.json()
+                )
 
             df = pd.DataFrame(data)
             df['time'] = df['year'] + '-' + \
@@ -914,12 +758,73 @@ class LaborStats(MarketData):
 
 
 class Glassnode(MarketData):
-    def __init__(self):
+    def __init__(self, use_cookies=False):
         super().__init__()
         self.base = 'https://api.glassnode.com'
         self.version = 'v1'
         self.token = os.environ.get('GLASSNODE')
         self.provider = 'glassnode'
+        self.use_cookies = use_cookies
+        if self.use_cookies:
+            self.use_auth()
+
+    def use_auth(self):
+        options = ChromeOptions()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.set_capability('goog:loggingPrefs', {"performance": "ALL"})
+
+        driver = webdriver.Chrome(options=options)
+        driver.get('https://studio.glassnode.com/auth/login')
+        delay = 10
+
+        def get_element(id):
+            return WebDriverWait(driver, delay).until(
+                EC.presence_of_element_located((By.ID, id)))
+
+        email = get_element('email')
+        email.send_keys(os.environ['RH_USERNAME'])
+        password = get_element('current-password')
+        password.send_keys(os.environ['GLASSNODE_PASS'])
+        password.send_keys(Keys.ENTER)
+        sleep(15)
+        driver.get('https://studio.glassnode.com/metrics')
+        sleep(5)
+        url = "https://api.glassnode.com/v1/metrics/market/price_usd_close?a=BTC&i=24h&referer=charts"
+        driver.get(url)
+        sleep(5)  # wait for the requests to take place
+
+        # extract requests from logs
+        raw_logs = driver.get_log("performance")
+        logs = [json.loads(raw_log["message"])["message"]
+                for raw_log in raw_logs]
+
+        def log_filter(log_):
+            return (
+                log_["method"] == "Network.requestWillBeSent" and
+                log_['params']['request']['url'] == url and
+                log_['params']['request']['method'] == 'GET'
+            )
+
+        self.headers = [log['params']['request']['headers']
+                        for log in filter(log_filter, logs)][-1]
+        self.cookies = {cookie['name']: cookie['value']
+                        for cookie in driver.get_cookies()}
+
+    def make_request(self, url):
+        params = {'a': 'BTC', 'c': 'native', 'i': '24h', 'referer': 'charts'}
+        if self.use_cookies:
+            headers = self.headers
+            cookies = self.cookies
+        else:
+            params['api_key'] = self.token
+            headers = {}
+            cookies = {}
+        response = requests.get(
+            url, params=params, headers=headers, cookies=cookies)
+        sleep(random() * 5)
+        return response
 
     def get_s2f_ratio(self, **kwargs):
         def _get_s2f_ratio(timeframe):
@@ -932,14 +837,13 @@ class Glassnode(MarketData):
             ]
             url = '/'.join(parts)
             empty = pd.DataFrame()
-            response = requests.get(
-                url, params={'a': 'BTC', 'api_key': self.token})
+            response = self.make_request(url)
 
             if response.ok:
                 data = response.json()
             else:
                 raise Exception(
-                    'Invalid response from Glassnode for S2F Ratio')
+                    'Invalid response from Glassnode for S2F Ratio', response)
 
             if data == []:
                 return empty
@@ -962,14 +866,15 @@ class Glassnode(MarketData):
             ]
             url = '/'.join(parts)
             empty = pd.DataFrame()
-            response = requests.get(
-                url, params={'a': 'BTC', 'api_key': self.token})
+            response = self.make_request(url)
 
             if response.ok:
                 data = response.json()
             else:
                 raise Exception(
-                    'Invalid response from Glassnode for Difficulty Ribbon')
+                    'Invalid response from Glassnode for Difficulty Ribbon',
+                    response
+                )
 
             if data == []:
                 return empty
@@ -992,14 +897,13 @@ class Glassnode(MarketData):
             ]
             url = '/'.join(parts)
             empty = pd.DataFrame()
-            response = requests.get(
-                url, params={'a': 'BTC', 'api_key': self.token})
+            response = self.make_request(url)
 
             if response.ok:
                 data = response.json()
             else:
                 raise Exception(
-                    'Invalid response from Glassnode for SOPR')
+                    'Invalid response from Glassnode for SOPR', response)
 
             if data == []:
                 return empty

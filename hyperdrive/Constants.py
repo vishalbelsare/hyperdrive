@@ -2,8 +2,13 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from pytz import timezone
+import vectorbt as vbt
 
 load_dotenv(find_dotenv('config.env'))
+
+
+def get_env_int(var_name, default=None):
+    return int(os.environ[var_name]) if os.environ.get(var_name) and os.environ[var_name].isnumeric() else default
 
 
 def get_env_bool(var_name):
@@ -19,23 +24,23 @@ TEST = get_env_bool('TEST')
 # File Paths
 # data
 DATA_DIR = 'data'
+API_DIR = 'api'
 DEV_DIR = 'dev'
 DIV_DIR = 'dividends'
 SPLT_DIR = 'splits'
 OHLC_DIR = 'ohlc'
 SENT_DIR = 'sentiment'
 INTRA_DIR = 'intraday'
+IDX_DIR = 'indices'
 # providers
-IEX_DIR = 'iexcloud'
 POLY_DIR = 'polygon'
-TWIT_DIR = 'stocktwits'
+ALPACA_DIR = 'alpaca'
 # models
 MODELS_DIR = 'models'
 
 folders = {
-    'iexcloud': IEX_DIR,
     'polygon': POLY_DIR,
-    'stocktwits': TWIT_DIR
+    'alpaca': ALPACA_DIR
 }
 
 # Column Names
@@ -65,14 +70,15 @@ TRADES = 'Trades'
 
 # Time
 TZ = timezone('US/Eastern')
+UTC = timezone('UTC')
 DATE_FMT = '%Y-%m-%d'
 TIME_FMT = '%H:%M'
+PRECISE_TIME_FMT = '%H:%M:%S'
 
 # Sentiment
 POS = 'Pos'
 NEG = 'Neg'
 DELTA = 'Delta'
-TWIT_RATE = 175
 
 # Unemployment
 UN_RATE = 'UnRate'
@@ -86,14 +92,27 @@ MAs = ['MA9', 'MA14', 'MA25', 'MA40', 'MA60', 'MA90', 'MA128', 'MA200']
 # SOPR
 SOPR = 'SOPR'
 
-# Signals
+# Oracle
 SIG = 'Sig'
+BUY = 'BUY'
+SELL = 'SELL'
+
+# API
+BAL = 'Bal'
+NAME = 'Name'
+ABS_TOL = vbt.utils.math_.abs_tol
+
+# Model
+MAX_MODEL_AGE_DAYS = 90  # 3 months
+MIN_MODEL_ACCURACY = 0.925
 
 # Misc
 POLY_CRYPTO_SYMBOLS = [
     'X%3ABTCUSD', 'X%3AETHUSD',
     'X%3ALTCUSD', 'X%3AXMRUSD', 'X%3AIOTUSD'
 ]
+
+ALPC_CRYPTO_SYMBOLS = ['BTC/USD', 'ETH/USD', 'LTC/USD']
 
 SENTIMENT_SYMBOLS_IGNORE = {
     'SPYD', 'VWDRY', 'BPMP',
@@ -104,9 +123,25 @@ SENTIMENT_SYMBOLS_IGNORE = {
 DEFAULT_RETRIES = 2
 DEFAULT_DELAY = 2
 POLY_FREE_DELAY = 13
+POLY_MAX_LIMIT = 1000
+POLY_MAX_AGGS_LIMIT = 50000
 FEW = 3
 FEW_DAYS = str(FEW) + 'd'
 SCRIPT_FAILURE_THRESHOLD = 0.95
+
+ALPACA_FREE_DELAY = 0.5
+
+# Exchanges
+BINANCE = 'BINANCE'
+KRAKEN = 'KRAKEN'
+PREF_EXCHANGE = os.environ.get(
+    'PREF_EXCHANGE') and os.environ['PREF_EXCHANGE'].upper()
+
+# fee is 0.1%
+BINANCE_FEE = 0.001
+KRAKEN_SYMBOLS = {'BTC': 'XXBT', 'USD': 'ZUSD'}
+BINANCE_TEST_SPEND = 0.01
+KRAKEN_TEST_SPEND = 0.005
 
 
 class PathFinder:
@@ -120,7 +155,7 @@ class PathFinder:
             'symbols.csv'
         )
 
-    def get_dividends_path(self, symbol, provider='iexcloud'):
+    def get_dividends_path(self, symbol, provider=POLY_DIR):
         # given a symbol
         # return the path to its csv
         return os.path.join(
@@ -130,7 +165,7 @@ class PathFinder:
             f'{symbol.upper()}.csv'
         )
 
-    def get_splits_path(self, symbol, provider='iexcloud'):
+    def get_splits_path(self, symbol, provider=POLY_DIR):
         # given a symbol
         # return the path to its stock splits
         return os.path.join(
@@ -140,7 +175,7 @@ class PathFinder:
             f'{symbol.upper()}.csv'
         )
 
-    def get_ohlc_path(self, symbol, provider='iexcloud'):
+    def get_ohlc_path(self, symbol, provider=POLY_DIR):
         # given a symbol
         # return the path to its ohlc data
         return os.path.join(
@@ -150,17 +185,7 @@ class PathFinder:
             f'{symbol.upper()}.csv'
         )
 
-    def get_sentiment_path(self, symbol, provider='stocktwits'):
-        # given a symbol
-        # return the path to its social sentiment data
-        return os.path.join(
-            DATA_DIR,
-            SENT_DIR,
-            folders[provider],
-            f'{symbol.upper()}.csv'
-        )
-
-    def get_intraday_path(self, symbol, date, provider='iexcloud'):
+    def get_intraday_path(self, symbol, date, provider=POLY_DIR):
         # given a symbol,
         # return the path to its intraday ohlc data
         return os.path.join(
@@ -193,6 +218,41 @@ class PathFinder:
         return os.path.join(
             DATA_DIR,
             'sopr.csv'
+        )
+
+    def get_signals_path(self):
+        return os.path.join(
+            MODELS_DIR,
+            'latest',
+            'signals.csv'
+        )
+
+    def get_orders_path(self):
+        return os.path.join(
+            MODELS_DIR,
+            'latest',
+            'orders.csv'
+        )
+
+    def get_new_orders_path(self, provider):
+        return os.path.join(
+            DATA_DIR,
+            'orders',
+            f'{provider}.csv'
+        )
+
+    def get_api_path(self, endpoint):
+        return os.path.join(
+            DATA_DIR,
+            API_DIR,
+            f'{endpoint}.json',
+        )
+
+    def get_ndx_path(self):
+        return os.path.join(
+            DATA_DIR,
+            IDX_DIR,
+            'ndx.csv'
         )
 
     def get_all_paths(self, path, truncate=False):

@@ -8,8 +8,9 @@ on:
   #   branches:
   #     - feature/predict
   schedule:
-    - cron: "0 2 * * *"
-    # 9pm EST every day
+    - cron: "00 22 * * *"
+    # 5:00pm EST / 22:00 UTC every day
+    # 2 hr before 00:00 UTC
   workflow_dispatch:
 
 jobs:
@@ -17,15 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
-      - name: Set up Python 3.8
-        uses: actions/setup-python@v2
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v4
         with:
-          python-version: 3.8
+          python-version: '3.9'
 
       - name: Cache pip dependencies
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -45,6 +46,9 @@ jobs:
         run: |
           python util/decrypt.py encrypted/predict_signal.py
 
+      - name: Sleep until 00:00 UTC
+        run: python scripts/sleep.py 00:00
+
       - name: Predict signal
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -53,7 +57,24 @@ jobs:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           POLYGON: ${{ secrets.POLYGON }}
           GLASSNODE: ${{ secrets.GLASSNODE }}
-          BINANCE_KEY: ${{ secrets.BINANCE_KEY }}
-          BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
+          RH_USERNAME: ${{ secrets.RH_USERNAME }}
+          GLASSNODE_PASS: ${{ secrets.GLASSNODE_PASS }}
+          EMIT_SECRET: ${{ secrets.EMIT_SECRET }}
+          SALT: ${{ secrets.SALT }}
+          RH_PASSWORD: ${{ secrets.RH_PASSWORD }}
         run: |
           python encrypted/predict_signal.py
+
+      - name: Execute order
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          BINANCE_KEY: ${{ secrets.BINANCE_KEY }}
+          BINANCE_SECRET: ${{ secrets.BINANCE_SECRET }}
+          KRAKEN_KEY: ${{ secrets.KRAKEN_KEY }}
+          KRAKEN_SECRET: ${{ secrets.KRAKEN_SECRET }}
+          PREF_EXCHANGE: ${{ secrets.PREF_EXCHANGE }}
+        run: |
+          python scripts/execute_order.py
